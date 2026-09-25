@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# qmusic (yt) - Minimalist & Fast YouTube Audio Player CLI
+# ==============================================================================
+
+set -e
+
+SOCKET="/tmp/mpv-socket"
+PID_FILE="/tmp/mpv-qmusic.pid"
+FAV_FILE="$HOME/.config/qmusic/fav.txt"
+LOG_FILE="/tmp/qmusic.log"
+
+# --- Socket IPC Helper ---
+send_ipc() {
+    if command -v socat >/dev/null 2>&1; then
+        timeout 1 socat -t 0.5 - "$SOCKET" 2>/dev/null
+    elif command -v nc >/dev/null 2>&1; then
+        timeout 1 nc -U -w 1 "$SOCKET" 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        timeout 1 python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(0.5); s.connect('$SOCKET'); s.sendall(sys.stdin.read().encode()); s.shutdown(socket.SHUT_WR); print(s.recv(4096).decode('utf-8', 'ignore'))" 2>/dev/null
+    fi
+}
+
+is_running() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$PID_FILE" "$SOCKET" 2>/dev/null
+            return 1
+        fi
+    fi
+    [ -S "$SOCKET" ] && echo '{ "command": ["get_property", "pause"] }' | send_ipc 2>/dev/null | grep -q '"error":"success"'
+}
+
+# --- Clipboard Helper (Wayland / X11) ---
+get_clipboard() {
+    local text=""
+    if [ -n "$WAYLAND_DISPLAY" ] && command -v wl-paste >/dev/null 2>&1; then
+        text=$(wl-paste --no-newline 2>/dev/null)
+    elif [ -n "$DISPLAY" ] && command -v xclip >/dev/null 2>&1; then
+        text=$(timeout 1 xclip -selection clipboard -o 2>/dev/null)
+    elif [ -n "$DISPLAY" ] && command -v xsel >/dev/null 2>&1; then
+        text=$(timeout 1 xsel -b -o 2>/dev/null)
+    elif command -v wl-paste >/dev/null 2>&1; then
+        text=$(wl-paste --no-newline 2>/dev/null)
+    elif command -v xclip >/dev/null 2>&1; then
+        text=$(timeout 1 xclip -selection clipboard -o 2>/dev/null)
+    elif command -v xsel >/dev/null 2>&1; then
+        text=$(timeout 1 xsel -b -o 2>/dev/null)
+    fi
+    echo "$text"
+}
+
+extract_youtube_url() {
+    local text="$1"
+    local url=""
+    local trimmed
+    trimmed=$(echo "$text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    local re='^(https?://)?(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/[^[:space:]]+$'
+    if [[ "$trimmed" =~ $re ]]; then
+        url="$trimmed"
+    else
+        url=$(echo "$text" | grep -oE '(https?://)?(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/[^[:space:]]+' | head -n 1)
+    fi
+
+    if [ -n "$url" ]; then
+        if [[ "$url" != http* ]]; then
+            url="https://$url"
+        fi
+        echo "$url"
+    fi
+}
+
+# --- Playback Logic ---
+play_song() {
+    local target="$1"
+    local play_url=""
+    local is_search=0
+
+    if [[ "$target" =~ ^https?:// ]] || [[ "$target" =~ ^ytdl:// ]]; then
+        play_url="$target"
+    elif [[ "$target" =~ ^(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/ ]]; then
+        play_url="https://$target"
+    else
+        # Tìm kiếm bằng từ khóa kết quả đầu tiên
+        play_url="ytdl://ytsearch1:$target"
+        is_search=1
+    fi
+
+    # Tắt tiến trình cũ nếu đang chạy
+    if is_running; then
+        echo 'quit' | send_ipc >/dev/null 2>&1
+        sleep 0.1
+    fi
+    if [ -f "$PID_FILE" ]; then
+        local old_pid
+        old_pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            kill "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+    rm -f "$SOCKET" 2>/dev/null
+
+    local mpv_opts=(
+        --no-video
+        --vo=null
+        --audio-display=no
+        --input-ipc-server="$SOCKET"
+        --ytdl-format="bestaudio/best"
+    )
+
+    if command -v node >/dev/null 2>&1; then
+        mpv_opts+=(--ytdl-raw-options="js-runtimes=node")
+    elif command -v deno >/dev/null 2>&1; then
+        mpv_opts+=(--ytdl-raw-options="js-runtimes=deno")
+    fi
+
+    if command -v setsid >/dev/null 2>&1; then
+        setsid mpv "${mpv_opts[@]}" "$play_url" > "$LOG_FILE" 2>&1 &
+    else
+        nohup mpv "${mpv_opts[@]}" "$play_url" > "$LOG_FILE" 2>&1 &
+    fi
+    local new_pid=$!
+    echo "$new_pid" > "$PID_FILE"
+    disown "$new_pid" 2>/dev/null || true
+
+    if [ "$is_search" -eq 1 ]; then
+        echo "🔍 Đang tìm kiếm & phát: \"$target\""
+    else
+        echo "▶  Đang phát: $play_url"
+    fi
+    echo "   [yt p: Tạm dừng | yt stop: Tắt | yt v +5: Âm lượng | yt --save: Lưu bài tủ]"
+}
+
+# --- IPC Commands ---
+toggle_pause() {
+    if ! is_running; then
+        echo "Không có bài hát nào đang chạy."
+        return 1
+    fi
+    echo 'cycle pause' | send_ipc >/dev/null 2>&1
+    local state
+    state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | grep -oP '"data":\K(true|false)')
+    if [ "$state" = "true" ]; then
+        echo "⏸  Đã tạm dừng (Paused)"
+    else
+        echo "▶  Đang tiếp tục phát (Resumed)"
+    fi
+}
+
+stop_music() {
+    if ! is_running; then
+        echo "Không có bài hát nào đang chạy."
+        rm -f "$SOCKET" "$PID_FILE" 2>/dev/null
+        return 0
+    fi
+    echo 'quit' | send_ipc >/dev/null 2>&1
+    sleep 0.1
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+    rm -f "$SOCKET" 2>/dev/null
+    echo "⏹  Đã tắt nhạc."
+}
+
+change_volume() {
+    if ! is_running; then
+        echo "Không có bài hát nào đang chạy."
+        return 1
+    fi
+    local arg="$1"
+    if [ -z "$arg" ]; then
+        local vol
+        vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+        echo "🔊 Âm lượng hiện tại: ${vol:-100}%"
+        return 0
+    fi
+
+    case "$arg" in
+        "+") arg="+5" ;;
+        "-") arg="-5" ;;
+    esac
+
+    if [[ "$arg" =~ ^[+-][0-9]+$ ]]; then
+        echo "add volume $arg" | send_ipc >/dev/null 2>&1
+    elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+        echo "set volume $arg" | send_ipc >/dev/null 2>&1
+    else
+        echo "Giá trị không hợp lệ. Ví dụ: yt v +5, yt v -5, yt v 80"
+        return 1
+    fi
+
+    local vol
+    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+    echo "🔊 Âm lượng: ${vol:-100}%"
+}
+
+save_favorite() {
+    local url="$1"
+    local title=""
+
+    if [ -z "$url" ]; then
+        if ! is_running; then
+            echo "Không có bài hát nào đang phát để lưu!"
+            return 1
+        fi
+
+        # Lấy thông tin bài đang phát qua socket
+        for _ in 1 2 3 4 5; do
+            url=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | grep -oP '"data":"\K[^"]+')
+            title=$(echo '{ "command": ["get_property", "media-title"] }' | send_ipc | sed -n 's/.*"data":"\(.*\)","request_id".*/\1/p')
+            if [ -n "$url" ] && [[ "$url" == http* ]]; then
+                break
+            fi
+            sleep 0.5
+        done
+
+        if [ -z "$url" ] || [[ "$url" != http* ]]; then
+            echo "Không thể lấy link bài đang phát (vui lòng thử lại sau vài giây)."
+            return 1
+        fi
+    fi
+
+    mkdir -p "$(dirname "$FAV_FILE")"
+    touch "$FAV_FILE"
+
+    if grep -Fxq "$url" "$FAV_FILE" 2>/dev/null; then
+        echo "⭐ Bài này đã có trong danh sách bài tủ!"
+        [ -n "$title" ] && echo "   Tiêu đề: $title"
+        echo "   Link   : $url"
+        return 0
+    fi
+
+    [ -n "$title" ] && echo "# $title" >> "$FAV_FILE"
+    echo "$url" >> "$FAV_FILE"
+    echo "⭐ Đã lưu vào bài tủ ($FAV_FILE):"
+    [ -n "$title" ] && echo "   Tiêu đề: $title"
+    echo "   Link   : $url"
+}
+
+play_favorite() {
+    if [ ! -f "$FAV_FILE" ] || [ ! -s "$FAV_FILE" ]; then
+        echo "Danh sách bài tủ trống ($FAV_FILE)!"
+        echo "Mẹo: Dùng 'yt --save' khi đang nghe bài bạn thích để lưu lại."
+        return 1
+    fi
+
+    local song
+    song=$(grep -v '^[[:space:]]*#' "$FAV_FILE" 2>/dev/null | grep -E 'https?://|ytdl://' | shuf -n 1)
+    if [ -z "$song" ]; then
+        echo "Không tìm thấy link nào trong file bài tủ ($FAV_FILE)!"
+        return 1
+    fi
+
+    echo "🎲 Đang mở bài tủ ngẫu nhiên..."
+    play_song "$song"
+}
+
+show_status() {
+    if ! is_running; then
+        echo "Không có bài hát nào đang chạy."
+        return 0
+    fi
+    local title path pause_state vol
+    title=$(echo '{ "command": ["get_property", "media-title"] }' | send_ipc | sed -n 's/.*"data":"\(.*\)","request_id".*/\1/p')
+    path=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | grep -oP '"data":"\K[^"]+')
+    pause_state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | grep -oP '"data":\K(true|false)')
+    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+
+    local state_str="Đang phát ▶"
+    [ "$pause_state" = "true" ] && state_str="Tạm dừng ⏸"
+
+    echo "🎵 Tiêu đề : ${title:-Đang tải...}"
+    [ -n "$path" ] && echo "🔗 Link    : $path"
+    echo "📊 Trạng thái: $state_str | Âm lượng: ${vol:-100}%"
+}
+
+show_help() {
+    cat << 'EOF'
+qmusic (yt) - Trình nghe nhạc YouTube cực nhẹ chạy ngầm
+
+Cách dùng:
+  yt                         Tự bắt link YouTube từ clipboard và phát
+  yt <từ khóa / URL>         Tìm kiếm bài hát hoặc phát link YouTube
+  yt p                       Tạm dừng / Tiếp tục phát (Pause / Resume)
+  yt stop                    Dừng và tắt hẳn nhạc
+  yt v [+5 / -5 / 80]        Tăng, giảm hoặc đặt mức âm lượng (0-130)
+  yt --save                  Lưu bài đang phát vào danh sách bài tủ
+  yt --fav                   Phát ngẫu nhiên một bài trong danh sách tủ
+  yt --fav list              Xem danh sách bài tủ (~/.config/qmusic/fav.txt)
+  yt status                  Xem trạng thái và bài hát hiện tại
+EOF
+}
+
+# --- Main Dispatcher ---
+if [ $# -eq 0 ]; then
+    clip_text=$(get_clipboard)
+    yt_url=$(extract_youtube_url "$clip_text")
+    if [ -n "$yt_url" ]; then
+        echo "📋 Phát hiện link YouTube từ clipboard:"
+        play_song "$yt_url"
+    else
+        if is_running; then
+            show_status
+        else
+            echo "Clipboard không chứa link YouTube."
+            echo ""
+            show_help
+        fi
+    fi
+    exit 0
+fi
+
+case "$1" in
+    "p"|"pause"|"resume")
+        toggle_pause
+        ;;
+    "stop"|"q"|"quit")
+        stop_music
+        ;;
+    "v"|"vol"|"volume")
+        change_volume "$2"
+        ;;
+    "--save"|"save")
+        save_favorite "$2"
+        ;;
+    "--fav"|"fav")
+        if [ "$2" = "list" ] || [ "$2" = "ls" ]; then
+            if [ -f "$FAV_FILE" ] && [ -s "$FAV_FILE" ]; then
+                echo "📂 Danh sách bài tủ ($FAV_FILE):"
+                cat "$FAV_FILE"
+            else
+                echo "Danh sách bài tủ đang trống ($FAV_FILE)."
+            fi
+        else
+            play_favorite
+        fi
+        ;;
+    "status"|"now"|"info")
+        show_status
+        ;;
+    "-h"|"--help"|"help")
+        show_help
+        ;;
+    *)
+        # Người dùng nhập URL hoặc từ khóa tìm kiếm (kể cả không có ngoặc kép)
+        play_song "$*"
+        ;;
+esac
