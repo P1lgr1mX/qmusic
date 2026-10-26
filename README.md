@@ -2,14 +2,14 @@
 
 <div align="center">
 
-**A minimalist, lightning-fast background YouTube audio player for the Linux terminal.**
+**A minimalist, lightning-fast background YouTube audio player for Linux and macOS terminals.**
 
-[![Platform](https://img.shields.io/badge/platform-Linux-blue.svg?style=flat-square)](https://www.kernel.org)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue.svg?style=flat-square)](#-prerequisites)
 [![Shell](https://img.shields.io/badge/shell-Bash%204.0+-4EAA25.svg?style=flat-square)](https://www.gnu.org/software/bash/)
 [![Engine](https://img.shields.io/badge/engine-mpv%20%2B%20yt--dlp-red.svg?style=flat-square)](https://mpv.io)
 [![License](https://img.shields.io/badge/license-MIT-informational.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-[Overview](#-overview) • [Features](#-key-features) • [Prerequisites](#-prerequisites) • [Installation](#-installation) • [Usage](#-command-reference) • [Window Manager Shortcuts](#-window-manager-integration) • [Architecture](#-architecture)
+[Overview](#-overview) • [Features](#-key-features) • [Prerequisites](#-prerequisites) • [Installation](#-installation) • [Usage](#-command-reference) • [Shortcuts & Hotkeys](#-hotkey--shortcut-integration) • [Architecture](#-architecture)
 
 </div>
 
@@ -37,7 +37,7 @@ $ yt lofi hip hop radio
 
 ## ✨ Key Features
 
-- 📋 **Zero-Touch Clipboard Playback**: Simply type `yt` and hit Enter—it auto-detects and streams YouTube URLs directly from your clipboard (native support for **Wayland** via `wl-clipboard` and **X11** via `xclip`/`xsel`).
+- 📋 **Zero-Touch Clipboard Playback**: Simply type `yt` and hit Enter—it auto-detects and streams YouTube URLs directly from your clipboard (native support for **macOS** via `pbpaste`, **Wayland** via `wl-clipboard`, and **X11** via `xclip`/`xsel`).
 - 🔍 **Fuzzy Keyword Search**: No need to open a web browser. Enter search terms directly (e.g. `yt chill synthwave`), and `qmusic` automatically queries and streams the top matching track.
 - ⚡ **Background Daemon with Instant IPC**: Runs completely detached from your terminal session using `mpv`'s JSON IPC server. Your shell prompt is freed immediately.
 - 🪶 **Low Resource & Bandwidth Friendly**: Disables video rendering entirely (`--no-video`, `--audio-display=no`, `bestaudio`), saving massive CPU cycles, RAM, and network bandwidth.
@@ -50,7 +50,7 @@ $ yt lofi hip hop radio
 
 ## 🛠 Prerequisites
 
-`qmusic` requires a few standard Linux CLI utilities:
+`qmusic` requires a few standard CLI utilities:
 
 | Tool | Purpose | Required? |
 | :--- | :--- | :--- |
@@ -58,11 +58,26 @@ $ yt lofi hip hop radio
 | **`mpv`** | High-performance audio player backend | Yes |
 | **`yt-dlp`** | YouTube stream resolution and extractor | Yes |
 | **`socat`** or **`nc`** | UNIX domain socket IPC communication | Yes (or `python3`) |
+| **`pbpaste`** | macOS clipboard integration | Built-in on macOS |
 | **`wl-clipboard`** | Wayland clipboard integration (`wl-paste`) | Recommended on Wayland |
 | **`xclip`** / **`xsel`** | X11 clipboard integration | Recommended on X11 |
 | **`node`** / **`deno`** | Fast JS engine for `yt-dlp` cipher solving | Optional (Recommended) |
 
 ### Quick Install Commands
+
+#### macOS (via Homebrew)
+If you don't have [Homebrew](https://brew.sh) installed yet, install it with:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Then install `mpv` and all required tools in one command:
+```bash
+brew install mpv yt-dlp socat bash
+```
+
+> [!NOTE]
+> macOS includes native clipboard support via `pbpaste` out-of-the-box. Installing `mpv` via Homebrew provides the full command-line media engine. Modern `bash` is recommended since macOS ships with legacy Bash 3.2 by default.
 
 #### Arch Linux / Manjaro / EndeavourOS
 ```bash
@@ -161,9 +176,23 @@ Tracks are stored locally in plain text format at `~/.config/qmusic/fav.txt`.
 
 ---
 
-## ⌨️ Window Manager Integration
+## ⌨️ Hotkey & Shortcut Integration
 
-Because `qmusic` commands are non-blocking and return instantly, you can bind them directly to multimedia keys or custom shortcuts in your window manager.
+Because `qmusic` commands are non-blocking and return instantly, you can bind them directly to multimedia keys or custom shortcuts in your window manager or hotkey daemon.
+
+### macOS (skhd: `~/.config/skhd/skhdrc`)
+```bash
+# Play/Pause and Stop
+cmd + shift - space : yt p
+cmd + shift - escape : yt stop
+
+# Volume control
+cmd + shift - up    : yt v +5
+cmd + shift - down  : yt v -5
+
+# Play link directly from clipboard
+cmd + shift - y     : yt
+```
 
 ### Hyprland (`~/.config/hypr/hyprland.conf`)
 ```ini
@@ -209,7 +238,7 @@ bindsym $mod+m exec yt
           |                                                    |
           |                                                    v
           +------------> Reads Clipboard              Streams audio via
-                         (Wayland / X11)             bestaudio / yt-dlp
+                   (macOS / Wayland / X11)           bestaudio / yt-dlp
 ```
 
 - **IPC Socket**: `/tmp/mpv-socket`
@@ -235,6 +264,7 @@ If you encounter JavaScript challenge warnings, install `nodejs` or `deno` on yo
 <summary><b>Clipboard playback does not find link</b></summary>
 
 Verify that your clipboard utility is installed and functional:
+- On **macOS**: test with `pbpaste`
 - On **Wayland**: test with `wl-paste`
 - On **X11**: test with `xclip -selection clipboard -o` or `xsel -b -o`
 </details>

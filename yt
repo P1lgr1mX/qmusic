@@ -12,12 +12,19 @@ LOG_FILE="/tmp/qmusic.log"
 
 # --- Socket IPC Helper ---
 send_ipc() {
+    local timeout_cmd=""
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_cmd="timeout 1"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        timeout_cmd="gtimeout 1"
+    fi
+
     if command -v socat >/dev/null 2>&1; then
-        timeout 1 socat -t 0.5 - "$SOCKET" 2>/dev/null
+        $timeout_cmd socat -t 0.5 - "$SOCKET" 2>/dev/null
     elif command -v nc >/dev/null 2>&1; then
-        timeout 1 nc -U -w 1 "$SOCKET" 2>/dev/null
+        $timeout_cmd nc -U -w 1 "$SOCKET" 2>/dev/null
     elif command -v python3 >/dev/null 2>&1; then
-        timeout 1 python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(0.5); s.connect('$SOCKET'); s.sendall(sys.stdin.read().encode()); s.shutdown(socket.SHUT_WR); print(s.recv(4096).decode('utf-8', 'ignore'))" 2>/dev/null
+        $timeout_cmd python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(0.5); s.connect('$SOCKET'); s.sendall(sys.stdin.read().encode()); s.shutdown(socket.SHUT_WR); print(s.recv(4096).decode('utf-8', 'ignore'))" 2>/dev/null
     fi
 }
 
@@ -33,21 +40,23 @@ is_running() {
     [ -S "$SOCKET" ] && echo '{ "command": ["get_property", "pause"] }' | send_ipc 2>/dev/null | grep -q '"error":"success"'
 }
 
-# --- Clipboard Helper (Wayland / X11) ---
+# --- Clipboard Helper (Wayland / X11 / macOS) ---
 get_clipboard() {
     local text=""
     if [ -n "$WAYLAND_DISPLAY" ] && command -v wl-paste >/dev/null 2>&1; then
         text=$(wl-paste --no-newline 2>/dev/null)
     elif [ -n "$DISPLAY" ] && command -v xclip >/dev/null 2>&1; then
-        text=$(timeout 1 xclip -selection clipboard -o 2>/dev/null)
+        text=$(xclip -selection clipboard -o 2>/dev/null)
     elif [ -n "$DISPLAY" ] && command -v xsel >/dev/null 2>&1; then
-        text=$(timeout 1 xsel -b -o 2>/dev/null)
+        text=$(xsel -b -o 2>/dev/null)
+    elif command -v pbpaste >/dev/null 2>&1; then
+        text=$(pbpaste 2>/dev/null)
     elif command -v wl-paste >/dev/null 2>&1; then
         text=$(wl-paste --no-newline 2>/dev/null)
     elif command -v xclip >/dev/null 2>&1; then
-        text=$(timeout 1 xclip -selection clipboard -o 2>/dev/null)
+        text=$(xclip -selection clipboard -o 2>/dev/null)
     elif command -v xsel >/dev/null 2>&1; then
-        text=$(timeout 1 xsel -b -o 2>/dev/null)
+        text=$(xsel -b -o 2>/dev/null)
     fi
     echo "$text"
 }
@@ -142,7 +151,7 @@ toggle_pause() {
     fi
     echo 'cycle pause' | send_ipc >/dev/null 2>&1
     local state
-    state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | grep -oP '"data":\K(true|false)')
+    state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | sed -n 's/.*"data":\([a-z]*\).*/\1/p')
     if [ "$state" = "true" ]; then
         echo "⏸  Đã tạm dừng (Paused)"
     else
@@ -178,7 +187,7 @@ change_volume() {
     local arg="$1"
     if [ -z "$arg" ]; then
         local vol
-        vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+        vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | sed -n 's/.*"data":\([0-9.]*\).*/\1/p' | cut -d. -f1)
         echo "🔊 Âm lượng hiện tại: ${vol:-100}%"
         return 0
     fi
@@ -198,7 +207,7 @@ change_volume() {
     fi
 
     local vol
-    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | sed -n 's/.*"data":\([0-9.]*\).*/\1/p' | cut -d. -f1)
     echo "🔊 Âm lượng: ${vol:-100}%"
 }
 
@@ -214,7 +223,7 @@ save_favorite() {
 
         # Lấy thông tin bài đang phát qua socket
         for _ in 1 2 3 4 5; do
-            url=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | grep -oP '"data":"\K[^"]+')
+            url=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
             title=$(echo '{ "command": ["get_property", "media-title"] }' | send_ipc | sed -n 's/.*"data":"\(.*\)","request_id".*/\1/p')
             if [ -n "$url" ] && [[ "$url" == http* ]]; then
                 break
@@ -253,7 +262,14 @@ play_favorite() {
     fi
 
     local song
-    song=$(grep -v '^[[:space:]]*#' "$FAV_FILE" 2>/dev/null | grep -E 'https?://|ytdl://' | shuf -n 1)
+    if command -v shuf >/dev/null 2>&1; then
+        song=$(grep -v '^[[:space:]]*#' "$FAV_FILE" 2>/dev/null | grep -E 'https?://|ytdl://' | shuf -n 1)
+    elif command -v gshuf >/dev/null 2>&1; then
+        song=$(grep -v '^[[:space:]]*#' "$FAV_FILE" 2>/dev/null | grep -E 'https?://|ytdl://' | gshuf -n 1)
+    else
+        song=$(grep -v '^[[:space:]]*#' "$FAV_FILE" 2>/dev/null | grep -E 'https?://|ytdl://' | awk 'BEGIN{srand()} {print rand() "\t" $0}' | sort -k1,1n | cut -f2- | head -n 1)
+    fi
+
     if [ -z "$song" ]; then
         echo "Không tìm thấy link nào trong file bài tủ ($FAV_FILE)!"
         return 1
@@ -270,9 +286,9 @@ show_status() {
     fi
     local title path pause_state vol
     title=$(echo '{ "command": ["get_property", "media-title"] }' | send_ipc | sed -n 's/.*"data":"\(.*\)","request_id".*/\1/p')
-    path=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | grep -oP '"data":"\K[^"]+')
-    pause_state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | grep -oP '"data":\K(true|false)')
-    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | grep -oP '"data":\K[0-9.]+' | cut -d. -f1)
+    path=$(echo '{ "command": ["get_property", "path"] }' | send_ipc | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
+    pause_state=$(echo '{ "command": ["get_property", "pause"] }' | send_ipc | sed -n 's/.*"data":\([a-z]*\).*/\1/p')
+    vol=$(echo '{ "command": ["get_property", "volume"] }' | send_ipc | sed -n 's/.*"data":\([0-9.]*\).*/\1/p' | cut -d. -f1)
 
     local state_str="Đang phát ▶"
     [ "$pause_state" = "true" ] && state_str="Tạm dừng ⏸"
